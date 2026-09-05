@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: ticketloom
+          POSTGRES_PASSWORD: ticketloom
+          POSTGRES_DB: ticketloom
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ticketloom -d ticketloom"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://ticketloom:ticketloom@localhost:5432/ticketloom?schema=public
+      REDIS_URL: redis://127.0.0.1:6379
+      AUTH_SECRET: ci-test-secret-ticketloom-auth-32chars!!
+      AUTH_URL: http://localhost:3000
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      NEXT_PUBLIC_SOCKET_URL: http://localhost:3001
+      AI_PROVIDER: mock
+      AI_ENABLED: "true"
+      SKIP_ENV_VALIDATION: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Enable pgvector
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+          PGPASSWORD=ticketloom psql -h localhost -U ticketloom -d ticketloom -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+
+      - name: Migrate
+        run: npx prisma migrate deploy
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test
+
+      - name: Build
+        run: npm run build

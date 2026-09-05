@@ -1,0 +1,234 @@
+# Ticketloom Docker Compose — production-oriented packaging.
+#
+# SAFETY
+# - Does NOT touch Homebrew PostgreSQL on host :5432.
+# - Docker Postgres (profile `full`) uses host :5433 + volume ticketloom_postgres_data_v3.
+# - Never run `docker compose down -v` unless you intentionally wipe Docker volumes.
+# - Never use `prisma migrate reset` against shared/production data.
+#
+# Local Homebrew development (default):
+#   npm run redis:up
+#   # DATABASE_URL → localhost:5432 (Homebrew)
+#
+# Full Docker stack:
+#   cp .env.docker.example .env.docker   # set AUTH_SECRET etc.
+#   docker compose --env-file .env.docker --profile full up -d --build
+#   docker compose --env-file .env.docker --profile full run --rm migrate
+
+name: ticketloom
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    container_name: ticketloom-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - ticketloom_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  postgres:
+    profiles: ["full"]
+    image: pgvector/pgvector:pg18
+    container_name: ticketloom-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ticketloom}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ticketloom}
+      POSTGRES_DB: ${POSTGRES_DB:-ticketloom}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      # PG 18+ images expect the mount at /var/lib/postgresql (not .../data).
+      # Fresh empty volume for clean migrate deploy (older volumes left untouched).
+      - ticketloom_postgres_data_v3:/var/lib/postgresql
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  ollama:
+    profiles: ["full"]
+    image: ollama/ollama:0.6.5
+    container_name: ticketloom-ollama
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ticketloom_ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  migrate:
+    profiles: ["full"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ticketloom-migrate
+    env_file:
+      - path: .env.docker
+        required: false
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://ticketloom:ticketloom@postgres:5432/ticketloom?schema=public}
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["npx", "prisma", "migrate", "deploy"]
+    restart: "no"
+
+  app:
+    profiles: ["full"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ticketloom-app
+    restart: unless-stopped
+    env_file:
+      - path: .env.docker
+        required: false
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:-postgresql://ticketloom:ticketloom@postgres:5432/ticketloom?schema=public}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET in .env.docker}
+      AUTH_URL: ${AUTH_URL:-http://localhost:3000}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+      NEXT_PUBLIC_SOCKET_URL: ${NEXT_PUBLIC_SOCKET_URL:-http://localhost:3001}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      AI_PROVIDER: ${AI_PROVIDER:-ollama}
+      AI_ENABLED: ${AI_ENABLED:-true}
+      AI_MODEL: ${AI_MODEL:-llama3.2}
+      AI_EMBEDDING_MODEL: ${AI_EMBEDDING_MODEL:-nomic-embed-text}
+      RATE_LIMIT_FAIL_CLOSED: ${RATE_LIMIT_FAIL_CLOSED:-true}
+      AUTH_REQUIRE_EMAIL_VERIFICATION: ${AUTH_REQUIRE_EMAIL_VERIFICATION:-true}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:3000/api/health | grep -q '\"status\"' || exit 1",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 50s
+
+  worker:
+    profiles: ["full"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ticketloom-worker
+    restart: unless-stopped
+    env_file:
+      - path: .env.docker
+        required: false
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:-postgresql://ticketloom:ticketloom@postgres:5432/ticketloom?schema=public}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET in .env.docker}
+      AUTH_URL: ${AUTH_URL:-http://localhost:3000}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      AI_PROVIDER: ${AI_PROVIDER:-ollama}
+      AI_ENABLED: ${AI_ENABLED:-true}
+      AI_MODEL: ${AI_MODEL:-llama3.2}
+      AI_EMBEDDING_MODEL: ${AI_EMBEDDING_MODEL:-nomic-embed-text}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+    command: ["npm", "run", "worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"const Redis=require('ioredis'); const r=new Redis(process.env.REDIS_URL,{maxRetriesPerRequest:1,connectTimeout:2000,lazyConnect:true}); r.connect().then(()=>r.ping()).then(()=>{r.quit();process.exit(0)}).catch(()=>process.exit(1))\"",
+        ]
+      interval: 20s
+      timeout: 8s
+      retries: 5
+      start_period: 25s
+
+  socket:
+    profiles: ["full"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ticketloom-socket
+    restart: unless-stopped
+    env_file:
+      - path: .env.docker
+        required: false
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:-postgresql://ticketloom:ticketloom@postgres:5432/ticketloom?schema=public}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET in .env.docker}
+      AUTH_URL: ${AUTH_URL:-http://localhost:3000}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+      SOCKET_PORT: ${SOCKET_PORT:-3001}
+      SOCKET_CORS_ORIGINS: ${SOCKET_CORS_ORIGINS:-}
+    command: ["npm", "run", "socket"]
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:3001/health | grep -q '\"status\":\"ok\"' || exit 1",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 25s
+
+volumes:
+  ticketloom_postgres_data_v3:
+  ticketloom_redis_data:
+  ticketloom_ollama_data:

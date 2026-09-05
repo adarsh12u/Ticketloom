@@ -1,0 +1,1058 @@
+// Ticketloom Prisma schema — Auth (M2) + Org/RBAC (M3) + Ticketing (M4)
+// https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// Primary roles: OWNER, ADMIN, AGENT, VIEWER
+/// MANAGER/CUSTOMER retained for Milestone 2 compatibility (mapped in permission layer).
+enum MembershipRole {
+  OWNER
+  ADMIN
+  MANAGER
+  AGENT
+  VIEWER
+  CUSTOMER
+}
+
+enum MembershipStatus {
+  ACTIVE
+  INVITED
+  DEACTIVATED
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING_ON_CUSTOMER
+  RESOLVED
+  CLOSED
+}
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum TicketType {
+  QUESTION
+  INCIDENT
+  PROBLEM
+  FEATURE_REQUEST
+  OTHER
+}
+
+enum TicketMessageVisibility {
+  INTERNAL
+  CUSTOMER
+}
+
+enum TicketActivityType {
+  TICKET_CREATED
+  STATUS_CHANGED
+  PRIORITY_CHANGED
+  TYPE_CHANGED
+  ASSIGNED
+  REASSIGNED
+  UNASSIGNED
+  TEAM_CHANGED
+  CUSTOMER_CHANGED
+  TAG_ADDED
+  TAG_REMOVED
+  SUBJECT_CHANGED
+  INTERNAL_NOTE_ADDED
+  REPLY_ADDED
+  ARCHIVED
+  RESTORED
+  UPDATED
+}
+
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+  PROSPECT
+  ARCHIVED
+}
+
+enum CustomerActivityType {
+  CUSTOMER_CREATED
+  CUSTOMER_UPDATED
+  CUSTOMER_ARCHIVED
+  CUSTOMER_RESTORED
+  NOTE_ADDED
+  TAG_ADDED
+  TAG_REMOVED
+  TICKET_CREATED
+  TICKET_RESOLVED
+  TICKET_CLOSED
+  STATUS_CHANGED
+}
+
+enum ConversationStatus {
+  OPEN
+  PENDING
+  RESOLVED
+  CLOSED
+}
+
+enum ConversationParticipantRole {
+  AGENT
+  VIEWER
+}
+
+enum ChatMessageType {
+  TEXT
+  SYSTEM
+}
+
+enum ConversationActivityType {
+  CONVERSATION_CREATED
+  MESSAGE_SENT
+  ASSIGNED
+  UNASSIGNED
+  STATUS_CHANGED
+  PARTICIPANT_ADDED
+  LINKED_TICKET
+  RESOLVED
+  CLOSED
+  REOPENED
+}
+
+model User {
+  id                   String    @id @default(cuid())
+  name                 String?
+  firstName            String?   @map("first_name")
+  lastName             String?   @map("last_name")
+  email                String    @unique
+  emailVerified        DateTime? @map("email_verified")
+  image                String?
+  /// bcrypt hash only — never store plaintext passwords
+  passwordHash         String?   @map("password_hash")
+  /// Bumped on password reset/change — JWT iat must be after this for session validity
+  credentialsChangedAt DateTime? @map("credentials_changed_at")
+  activeOrganizationId String?   @map("active_organization_id")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  accounts             Account[]
+  sessions             Session[]
+  memberships          Membership[]
+  invitationsSent      OrganizationInvitation[] @relation("InvitationsSent")
+  activeOrganization   Organization?            @relation("ActiveOrganization", fields: [activeOrganizationId], references: [id], onDelete: SetNull)
+
+  ticketsCreated       Ticket[]        @relation("TicketCreatedBy")
+  ticketsAssigned      Ticket[]        @relation("TicketAssignee")
+  ticketMessages       TicketMessage[]
+  ticketActivities     TicketActivity[]
+  customerNotes        CustomerNote[]
+  customerActivities   CustomerActivity[]
+  conversationsAssigned Conversation[] @relation("ConversationAssignee")
+  conversationParticipants ConversationParticipant[]
+  chatMessages         ChatMessage[]
+  messageReadStates    MessageReadState[]
+  conversationActivities ConversationActivity[]
+  knowledgeBasesCreated KnowledgeBase[] @relation("KnowledgeBaseCreatedBy")
+  knowledgeArticlesAuthored KnowledgeArticle[] @relation("KnowledgeArticleAuthor")
+  knowledgeArticlesOwned KnowledgeArticle[] @relation("KnowledgeArticleOwner")
+  knowledgeVersionsEdited KnowledgeArticleVersion[] @relation("KnowledgeVersionEditor")
+  knowledgeArticleViews KnowledgeArticleView[]
+  knowledgeArticleFeedback KnowledgeArticleFeedback[]
+  knowledgeArticleActivities KnowledgeArticleActivity[]
+  knowledgeSearchEvents KnowledgeSearchEvent[]
+  aiUsageEvents AiUsageEvent[]
+  aiSuggestionEvents AiSuggestionEvent[]
+  ragRetrievalEvents RagRetrievalEvent[]
+
+  @@index([activeOrganizationId])
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String  @map("user_id")
+  type              String
+  provider          String
+  providerAccountId String  @map("provider_account_id")
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique @map("session_token")
+  userId       String   @map("user_id")
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+/// Used for email verification and password reset (store hashed tokens only)
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@index([identifier])
+  @@map("verification_tokens")
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  memberships      Membership[]
+  invitations      OrganizationInvitation[]
+  activeForUsers   User[]                   @relation("ActiveOrganization")
+
+  customers        Customer[]
+  teams            Team[]
+  tags             Tag[]
+  tickets          Ticket[]
+  ticketCounter    TicketCounter?
+  ticketMessages   TicketMessage[]
+  ticketActivities TicketActivity[]
+  customerNotes      CustomerNote[]
+  customerActivities CustomerActivity[]
+  conversations      Conversation[]
+  conversationParticipants ConversationParticipant[]
+  chatMessages       ChatMessage[]
+  conversationActivities ConversationActivity[]
+  knowledgeBases     KnowledgeBase[]
+  knowledgeCategories KnowledgeCategory[]
+  knowledgeArticles  KnowledgeArticle[]
+  knowledgeArticleVersions KnowledgeArticleVersion[]
+  knowledgeTags      KnowledgeTag[]
+  knowledgeArticleTags KnowledgeArticleTag[]
+  knowledgeArticleViews KnowledgeArticleView[]
+  knowledgeArticleFeedback KnowledgeArticleFeedback[]
+  knowledgeArticleActivities KnowledgeArticleActivity[]
+  knowledgeSearchEvents KnowledgeSearchEvent[]
+  aiUsageEvents AiUsageEvent[]
+  aiSuggestionEvents AiSuggestionEvent[]
+  knowledgeChunks KnowledgeChunk[]
+  ragRetrievalEvents RagRetrievalEvent[]
+
+  @@map("organizations")
+}
+
+model Membership {
+  id             String           @id @default(cuid())
+  userId         String           @map("user_id")
+  organizationId String           @map("organization_id")
+  role           MembershipRole   @default(AGENT)
+  status         MembershipStatus @default(ACTIVE)
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+  @@index([organizationId])
+  @@index([userId])
+  @@index([organizationId, status])
+  @@map("memberships")
+}
+
+model OrganizationInvitation {
+  id             String           @id @default(cuid())
+  organizationId String           @map("organization_id")
+  email          String
+  role           MembershipRole   @default(AGENT)
+  /// SHA-256 hash of the raw invitation token
+  tokenHash      String           @unique @map("token_hash")
+  status         InvitationStatus @default(PENDING)
+  expiresAt      DateTime         @map("expires_at")
+  invitedById    String           @map("invited_by_id")
+  acceptedAt     DateTime?        @map("accepted_at")
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  invitedBy    User         @relation("InvitationsSent", fields: [invitedById], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([email])
+  @@index([organizationId, email, status])
+  @@index([expiresAt])
+  @@map("organization_invitations")
+}
+
+/// Atomic per-organization ticket number sequence (safe under concurrency).
+model TicketCounter {
+  organizationId String @id @map("organization_id")
+  lastNumber     Int    @default(0) @map("last_number")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("ticket_counters")
+}
+
+/// Organization-scoped customer CRM (Milestone 5).
+model Customer {
+  id             String         @id @default(cuid())
+  organizationId String         @map("organization_id")
+  /// Display name (derived from first/last when provided)
+  name           String
+  firstName      String?        @map("first_name")
+  lastName       String?        @map("last_name")
+  email          String
+  phone          String?
+  company        String?
+  jobTitle       String?        @map("job_title")
+  image          String?
+  status         CustomerStatus @default(ACTIVE)
+  source         String?
+  /// Short profile summary (not the same as internal CustomerNote records)
+  profileNotes   String?        @map("profile_notes") @db.Text
+  externalId     String?        @map("external_id")
+  lastActivityAt DateTime       @default(now()) @map("last_activity_at")
+  archivedAt     DateTime?      @map("archived_at")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  tickets      Ticket[]
+  tags         CustomerTag[]
+  notes        CustomerNote[]
+  activities   CustomerActivity[]
+  conversations Conversation[]
+
+  @@unique([organizationId, email])
+  @@index([organizationId])
+  @@index([organizationId, name])
+  @@index([organizationId, status])
+  @@index([organizationId, company])
+  @@index([organizationId, lastActivityAt])
+  @@index([organizationId, createdAt])
+  @@index([organizationId, archivedAt])
+  @@index([email])
+  @@index([phone])
+  @@map("customers")
+}
+
+model CustomerTag {
+  customerId String @map("customer_id")
+  tagId      String @map("tag_id")
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  tag      Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([customerId, tagId])
+  @@index([tagId])
+  @@map("customer_tags")
+}
+
+/// Organization-internal customer notes (never customer-facing).
+model CustomerNote {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  customerId     String   @map("customer_id")
+  authorId       String   @map("author_id")
+  body           String   @db.Text
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  customer     Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  author       User         @relation(fields: [authorId], references: [id], onDelete: Restrict)
+
+  @@index([customerId, createdAt])
+  @@index([organizationId])
+  @@map("customer_notes")
+}
+
+model CustomerActivity {
+  id             String               @id @default(cuid())
+  organizationId String               @map("organization_id")
+  customerId     String               @map("customer_id")
+  actorId        String?              @map("actor_id")
+  type           CustomerActivityType
+  message        String?
+  metadata       Json?
+  createdAt      DateTime             @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  customer     Customer     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  actor        User?        @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([customerId, createdAt])
+  @@index([organizationId])
+  @@index([organizationId, type])
+  @@map("customer_activities")
+}
+
+model Team {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  name           String
+  slug           String
+  description    String?
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  tickets      Ticket[]
+
+  @@unique([organizationId, slug])
+  @@index([organizationId])
+  @@map("teams")
+}
+
+model Tag {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  name           String
+  slug           String
+  color          String?
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  tickets      TicketTag[]
+  customers    CustomerTag[]
+
+  @@unique([organizationId, slug])
+  @@index([organizationId])
+  @@map("tags")
+}
+
+model Ticket {
+  id             String         @id @default(cuid())
+  organizationId String         @map("organization_id")
+  /// Per-organization sequential number; display as TKT-000001
+  number         Int
+  numberKey      String         @map("number_key")
+  subject        String
+  description    String         @db.Text
+  status         TicketStatus   @default(OPEN)
+  priority       TicketPriority @default(MEDIUM)
+  type           TicketType     @default(QUESTION)
+
+  customerId  String  @map("customer_id")
+  createdById String  @map("created_by_id")
+  assigneeId  String? @map("assignee_id")
+  teamId      String? @map("team_id")
+
+  dueAt              DateTime? @map("due_at")
+  firstResponseDueAt DateTime? @map("first_response_due_at")
+  resolutionDueAt    DateTime? @map("resolution_due_at")
+  firstRespondedAt   DateTime? @map("first_responded_at")
+  resolvedAt         DateTime? @map("resolved_at")
+  closedAt           DateTime? @map("closed_at")
+  archivedAt         DateTime? @map("archived_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  customer     Customer         @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  createdBy    User             @relation("TicketCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  assignee     User?            @relation("TicketAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  team         Team?            @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  tags         TicketTag[]
+  messages     TicketMessage[]
+  activities   TicketActivity[]
+  conversations Conversation[]
+
+  @@unique([organizationId, number])
+  @@unique([organizationId, numberKey])
+  @@index([organizationId])
+  @@index([organizationId, status])
+  @@index([organizationId, priority])
+  @@index([organizationId, assigneeId])
+  @@index([organizationId, customerId])
+  @@index([organizationId, teamId])
+  @@index([organizationId, createdAt])
+  @@index([organizationId, updatedAt])
+  @@index([organizationId, archivedAt])
+  @@index([numberKey])
+  @@index([status])
+  @@index([priority])
+  @@index([assigneeId])
+  @@index([customerId])
+  @@map("tickets")
+}
+
+model TicketTag {
+  ticketId String @map("ticket_id")
+  tagId    String @map("tag_id")
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  tag    Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([ticketId, tagId])
+  @@index([tagId])
+  @@map("ticket_tags")
+}
+
+/// Internal notes vs customer-visible replies (chat/email processing later).
+model TicketMessage {
+  id             String                  @id @default(cuid())
+  organizationId String                  @map("organization_id")
+  ticketId       String                  @map("ticket_id")
+  authorId       String                  @map("author_id")
+  body           String                  @db.Text
+  visibility     TicketMessageVisibility
+  createdAt      DateTime                @default(now()) @map("created_at")
+  updatedAt      DateTime                @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  ticket       Ticket       @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author       User         @relation(fields: [authorId], references: [id], onDelete: Restrict)
+
+  @@index([ticketId, createdAt])
+  @@index([organizationId])
+  @@index([organizationId, visibility])
+  @@map("ticket_messages")
+}
+
+model TicketActivity {
+  id             String             @id @default(cuid())
+  organizationId String             @map("organization_id")
+  ticketId       String             @map("ticket_id")
+  actorId        String?            @map("actor_id")
+  type           TicketActivityType
+  message        String?
+  metadata       Json?
+  createdAt      DateTime           @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  ticket       Ticket       @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  actor        User?        @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([ticketId, createdAt])
+  @@index([organizationId])
+  @@index([organizationId, type])
+  @@map("ticket_activities")
+}
+
+/// Support conversation (customer ↔ agents). Optional ticket link.
+model Conversation {
+  id               String             @id @default(cuid())
+  organizationId   String             @map("organization_id")
+  customerId       String             @map("customer_id")
+  ticketId         String?            @map("ticket_id")
+  subject          String?
+  status           ConversationStatus @default(OPEN)
+  assignedAgentId  String?            @map("assigned_agent_id")
+  lastMessageAt    DateTime?          @map("last_message_at")
+  lastMessagePreview String?          @map("last_message_preview") @db.VarChar(280)
+  createdAt        DateTime           @default(now()) @map("created_at")
+  updatedAt        DateTime           @updatedAt @map("updated_at")
+  closedAt         DateTime?          @map("closed_at")
+
+  organization  Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  customer      Customer                   @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  ticket        Ticket?                    @relation(fields: [ticketId], references: [id], onDelete: SetNull)
+  assignedAgent User?                      @relation("ConversationAssignee", fields: [assignedAgentId], references: [id], onDelete: SetNull)
+  participants  ConversationParticipant[]
+  messages      ChatMessage[]
+  activities    ConversationActivity[]
+
+  @@unique([organizationId, ticketId])
+  @@index([organizationId])
+  @@index([organizationId, status])
+  @@index([organizationId, customerId])
+  @@index([organizationId, assignedAgentId])
+  @@index([organizationId, lastMessageAt])
+  @@index([organizationId, createdAt])
+  @@index([ticketId])
+  @@index([customerId])
+  @@map("conversations")
+}
+
+model ConversationParticipant {
+  id             String                       @id @default(cuid())
+  organizationId String                       @map("organization_id")
+  conversationId String                       @map("conversation_id")
+  userId         String                       @map("user_id")
+  role           ConversationParticipantRole  @default(AGENT)
+  lastReadAt     DateTime?                    @map("last_read_at")
+  lastReadMessageId String?                   @map("last_read_message_id")
+  joinedAt       DateTime                     @default(now()) @map("joined_at")
+  leftAt         DateTime?                    @map("left_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([organizationId])
+  @@index([userId])
+  @@index([conversationId])
+  @@map("conversation_participants")
+}
+
+model ChatMessage {
+  id             String          @id @default(cuid())
+  organizationId String          @map("organization_id")
+  conversationId String          @map("conversation_id")
+  senderUserId   String?         @map("sender_user_id")
+  /// Client-generated idempotency key (UUID) — unique per conversation
+  clientMessageId String         @map("client_message_id")
+  body           String          @db.Text
+  type           ChatMessageType @default(TEXT)
+  createdAt      DateTime        @default(now()) @map("created_at")
+  editedAt       DateTime?       @map("edited_at")
+  deletedAt      DateTime?       @map("deleted_at")
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  conversation Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User?             @relation(fields: [senderUserId], references: [id], onDelete: SetNull)
+  readStates   MessageReadState[]
+
+  @@unique([conversationId, clientMessageId])
+  @@index([organizationId])
+  @@index([conversationId, createdAt])
+  @@index([organizationId, conversationId, createdAt])
+  @@index([senderUserId])
+  @@map("chat_messages")
+}
+
+model MessageReadState {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  messageId      String   @map("message_id")
+  userId         String   @map("user_id")
+  readAt         DateTime @default(now()) @map("read_at")
+
+  message ChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([userId, readAt])
+  @@index([organizationId])
+  @@map("message_read_states")
+}
+
+model ConversationActivity {
+  id             String                    @id @default(cuid())
+  organizationId String                    @map("organization_id")
+  conversationId String                    @map("conversation_id")
+  actorId        String?                   @map("actor_id")
+  type           ConversationActivityType
+  message        String?
+  metadata       Json?
+  createdAt      DateTime                  @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  actor        User?        @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, createdAt])
+  @@index([organizationId])
+  @@index([organizationId, type])
+  @@map("conversation_activities")
+}
+
+// ─── Milestone 9 — Knowledge Base ───────────────────────────────────────────
+
+enum KnowledgeVisibility {
+  INTERNAL
+  PUBLIC
+}
+
+enum KnowledgeBaseStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum KnowledgeCategoryStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum KnowledgeArticleStatus {
+  DRAFT
+  IN_REVIEW
+  PUBLISHED
+  ARCHIVED
+}
+
+enum KnowledgeArticleActivityType {
+  ARTICLE_CREATED
+  ARTICLE_UPDATED
+  SUBMITTED_FOR_REVIEW
+  ARTICLE_PUBLISHED
+  ARTICLE_ARCHIVED
+  ARTICLE_REOPENED
+  VERSION_CREATED
+  VERSION_RESTORED
+  CATEGORY_CHANGED
+  TAGS_CHANGED
+  VISIBILITY_CHANGED
+}
+
+model KnowledgeBase {
+  id             String              @id @default(cuid())
+  organizationId String              @map("organization_id")
+  name           String
+  description    String?             @db.Text
+  slug           String
+  visibility     KnowledgeVisibility @default(INTERNAL)
+  status         KnowledgeBaseStatus @default(ACTIVE)
+  createdById    String              @map("created_by_id")
+  createdAt      DateTime            @default(now()) @map("created_at")
+  updatedAt      DateTime            @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdBy    User         @relation("KnowledgeBaseCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  categories   KnowledgeCategory[]
+  articles     KnowledgeArticle[]
+  tags         KnowledgeTag[]
+
+  @@unique([organizationId, slug])
+  @@index([organizationId])
+  @@index([organizationId, status])
+  @@map("knowledge_bases")
+}
+
+model KnowledgeCategory {
+  id               String                   @id @default(cuid())
+  organizationId   String                   @map("organization_id")
+  knowledgeBaseId  String                   @map("knowledge_base_id")
+  parentCategoryId String?                  @map("parent_category_id")
+  name             String
+  slug             String
+  description      String?                  @db.Text
+  sortOrder        Int                      @default(0) @map("sort_order")
+  status           KnowledgeCategoryStatus  @default(ACTIVE)
+  createdAt        DateTime                 @default(now()) @map("created_at")
+  updatedAt        DateTime                 @updatedAt @map("updated_at")
+
+  organization  Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  knowledgeBase KnowledgeBase      @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  parent        KnowledgeCategory? @relation("CategoryTree", fields: [parentCategoryId], references: [id], onDelete: SetNull)
+  children      KnowledgeCategory[] @relation("CategoryTree")
+  articles      KnowledgeArticle[]
+
+  @@unique([knowledgeBaseId, slug])
+  @@index([organizationId])
+  @@index([knowledgeBaseId, sortOrder])
+  @@index([parentCategoryId])
+  @@index([organizationId, status])
+  @@map("knowledge_categories")
+}
+
+model KnowledgeArticle {
+  id                   String                 @id @default(cuid())
+  organizationId       String                 @map("organization_id")
+  knowledgeBaseId      String                 @map("knowledge_base_id")
+  categoryId           String?                @map("category_id")
+  title                String
+  slug                 String
+  excerpt              String?                @db.Text
+  status               KnowledgeArticleStatus @default(DRAFT)
+  visibility           KnowledgeVisibility    @default(INTERNAL)
+  authorId             String                 @map("author_id")
+  ownerId              String                 @map("owner_id")
+  currentVersionId     String?                @map("current_version_id")
+  publishedVersionId   String?                @map("published_version_id")
+  bodyText             String                 @default("") @map("body_text") @db.Text
+  publishedAt          DateTime?              @map("published_at")
+  archivedAt           DateTime?              @map("archived_at")
+  viewCount            Int                    @default(0) @map("view_count")
+  helpfulCount         Int                    @default(0) @map("helpful_count")
+  unhelpfulCount       Int                    @default(0) @map("unhelpful_count")
+  createdAt            DateTime               @default(now()) @map("created_at")
+  updatedAt            DateTime               @updatedAt @map("updated_at")
+
+  organization     Organization              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  knowledgeBase    KnowledgeBase             @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  category         KnowledgeCategory?        @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  author           User                      @relation("KnowledgeArticleAuthor", fields: [authorId], references: [id], onDelete: Restrict)
+  owner            User                      @relation("KnowledgeArticleOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  currentVersion   KnowledgeArticleVersion?  @relation("ArticleCurrentVersion", fields: [currentVersionId], references: [id], onDelete: SetNull)
+  publishedVersion KnowledgeArticleVersion?  @relation("ArticlePublishedVersion", fields: [publishedVersionId], references: [id], onDelete: SetNull)
+  versions         KnowledgeArticleVersion[] @relation("ArticleVersions")
+  tags             KnowledgeArticleTag[]
+  views            KnowledgeArticleView[]
+  feedback         KnowledgeArticleFeedback[]
+  activities       KnowledgeArticleActivity[]
+
+  @@unique([knowledgeBaseId, slug])
+  @@index([organizationId])
+  @@index([organizationId, status])
+  @@index([organizationId, visibility])
+  @@index([organizationId, categoryId])
+  @@index([organizationId, updatedAt])
+  @@index([organizationId, publishedAt])
+  @@index([knowledgeBaseId, status])
+  @@map("knowledge_articles")
+}
+
+model KnowledgeArticleVersion {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  articleId      String   @map("article_id")
+  versionNumber  Int      @map("version_number")
+  title          String
+  excerpt        String?  @db.Text
+  bodyMarkdown   String   @map("body_markdown") @db.Text
+  bodyText       String   @map("body_text") @db.Text
+  changeSummary  String?  @map("change_summary")
+  editorId       String   @map("editor_id")
+  publishedAt    DateTime? @map("published_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  article      KnowledgeArticle @relation("ArticleVersions", fields: [articleId], references: [id], onDelete: Cascade)
+  editor       User @relation("KnowledgeVersionEditor", fields: [editorId], references: [id], onDelete: Restrict)
+  currentFor   KnowledgeArticle[] @relation("ArticleCurrentVersion")
+  publishedFor KnowledgeArticle[] @relation("ArticlePublishedVersion")
+
+  @@unique([articleId, versionNumber])
+  @@index([organizationId])
+  @@index([articleId, createdAt])
+  @@map("knowledge_article_versions")
+}
+
+model KnowledgeTag {
+  id              String   @id @default(cuid())
+  organizationId  String   @map("organization_id")
+  knowledgeBaseId String   @map("knowledge_base_id")
+  name            String
+  slug            String
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  knowledgeBase KnowledgeBase @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  articles      KnowledgeArticleTag[]
+
+  @@unique([knowledgeBaseId, slug])
+  @@index([organizationId])
+  @@map("knowledge_tags")
+}
+
+model KnowledgeArticleTag {
+  articleId String @map("article_id")
+  tagId     String @map("tag_id")
+  organizationId String @map("organization_id")
+
+  article KnowledgeArticle @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  tag     KnowledgeTag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@id([articleId, tagId])
+  @@index([tagId])
+  @@index([organizationId])
+  @@map("knowledge_article_tags")
+}
+
+model KnowledgeArticleView {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  articleId      String   @map("article_id")
+  viewerId       String?  @map("viewer_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  article      KnowledgeArticle @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  viewer       User? @relation(fields: [viewerId], references: [id], onDelete: SetNull)
+
+  @@index([articleId, createdAt])
+  @@index([organizationId, createdAt])
+  @@map("knowledge_article_views")
+}
+
+model KnowledgeArticleFeedback {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  articleId      String   @map("article_id")
+  userId         String   @map("user_id")
+  helpful        Boolean
+  comment        String?  @db.Text
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  article      KnowledgeArticle @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  user         User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([articleId, userId])
+  @@index([organizationId])
+  @@index([articleId, helpful])
+  @@map("knowledge_article_feedback")
+}
+
+model KnowledgeArticleActivity {
+  id             String                       @id @default(cuid())
+  organizationId String                       @map("organization_id")
+  articleId      String                       @map("article_id")
+  actorId        String?                      @map("actor_id")
+  type           KnowledgeArticleActivityType
+  message        String?
+  metadata       Json?
+  createdAt      DateTime                     @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  article      KnowledgeArticle @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  actor        User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([articleId, createdAt])
+  @@index([organizationId, type])
+  @@map("knowledge_article_activities")
+}
+
+model KnowledgeSearchEvent {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  userId         String?  @map("user_id")
+  query          String
+  resultCount    Int      @map("result_count")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, resultCount])
+  @@map("knowledge_search_events")
+}
+
+// ─── Milestone 10–12 — AI Assistance, RAG, Analytics ───
+
+enum AiFeature {
+  TICKET_SUMMARY
+  CONVERSATION_SUMMARY
+  REPLY_SUGGESTION
+  TONE_TRANSFORM
+  KNOWLEDGE_SEARCH
+  RAG_ANSWER
+}
+
+enum AiUsageStatus {
+  SUCCESS
+  FAILURE
+  UNAVAILABLE
+}
+
+enum AiSuggestionEventType {
+  GENERATED
+  INSERTED
+  EDITED
+  SENT
+  FEEDBACK_HELPFUL
+  FEEDBACK_NOT_HELPFUL
+}
+
+model AiUsageEvent {
+  id                    String        @id @default(cuid())
+  organizationId        String        @map("organization_id")
+  userId                String?       @map("user_id")
+  feature               AiFeature
+  provider              String
+  model                 String?
+  status                AiUsageStatus
+  latencyMs             Int?          @map("latency_ms")
+  inputTokens           Int?          @map("input_tokens")
+  outputTokens          Int?          @map("output_tokens")
+  retrievedSourcesCount Int?          @map("retrieved_sources_count")
+  errorCode             String?       @map("error_code")
+  /// Correlates suggestion lifecycle events; never store full prompts.
+  suggestionId          String?       @map("suggestion_id")
+  createdAt             DateTime      @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, feature])
+  @@index([suggestionId])
+  @@map("ai_usage_events")
+}
+
+model AiSuggestionEvent {
+  id             String                 @id @default(cuid())
+  organizationId String                 @map("organization_id")
+  userId         String                 @map("user_id")
+  suggestionId   String                 @map("suggestion_id")
+  feature        AiFeature
+  eventType      AiSuggestionEventType  @map("event_type")
+  createdAt      DateTime               @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, eventType])
+  @@index([suggestionId])
+  @@map("ai_suggestion_events")
+}
+
+model KnowledgeChunk {
+  id               String                       @id @default(cuid())
+  organizationId   String                       @map("organization_id")
+  knowledgeBaseId  String                       @map("knowledge_base_id")
+  articleId        String                       @map("article_id")
+  articleVersionId String                       @map("article_version_id")
+  chunkIndex       Int                          @map("chunk_index")
+  content          String                       @db.Text
+  title            String
+  section          String?
+  category         String?
+  contentHash      String                       @map("content_hash")
+  embedding        Unsupported("vector(768)")?
+  createdAt        DateTime                     @default(now()) @map("created_at")
+  updatedAt        DateTime                     @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([articleVersionId, chunkIndex])
+  @@index([organizationId, articleId])
+  @@index([organizationId, knowledgeBaseId])
+  @@map("knowledge_chunks")
+}
+
+model RagRetrievalEvent {
+  id                  String   @id @default(cuid())
+  organizationId      String   @map("organization_id")
+  userId              String?  @map("user_id")
+  queryHash           String   @map("query_hash")
+  queryPreview        String   @map("query_preview")
+  retrievedArticleIds String[] @map("retrieved_article_ids")
+  retrievalScores     Json?    @map("retrieval_scores")
+  selectedChunkCount  Int      @map("selected_chunk_count")
+  success             Boolean
+  latencyMs           Int?     @map("latency_ms")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@map("rag_retrieval_events")
+}

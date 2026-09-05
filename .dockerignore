@@ -1,0 +1,25 @@
+# Dependencies and build context
+node_modules
+npm-debug.log*
+.gitignore
+.git
+.github
+.next
+out
+coverage
+.turbo
+.vercel
+*.md
+!README.md
+.env
+.env.*
+!.env.example
+!.env.docker.example
+.DS_Store
+.tmp-pgvector
+.cursor
+agent-transcripts
+**/__tests__
+**/*.test.ts
+**/*.test.tsx
+docs
