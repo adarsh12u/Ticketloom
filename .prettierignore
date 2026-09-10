@@ -1,0 +1,9 @@
+node_modules
+.next
+out
+build
+coverage
+src/generated
+prisma/src/generated
+package-lock.json
+*.min.js
