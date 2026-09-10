@@ -49,7 +49,7 @@ export const appNavigation: NavGroup[] = [
     label: "Collaborate",
     items: [
       { title: "Inbox", href: "/inbox", icon: Inbox },
-      { title: "Support Chat", href: "/chat", icon: MessageSquare },
+      { title: "Chat", href: "/chat", icon: MessageSquare },
     ],
   },
   {

@@ -94,6 +94,7 @@ export const chatService = {
       status?: "OPEN" | "PENDING" | "RESOLVED" | "CLOSED";
       customerId?: string;
       ticketId?: string;
+      assignedAgentId?: string | null;
     },
   ) {
     const context = await requireChatPermission(userId, "chat.read");
@@ -105,6 +106,7 @@ export const chatService = {
       status: input.status,
       customerId: input.customerId,
       ticketId: input.ticketId,
+      assignedAgentId: input.assignedAgentId,
       skip: (page - 1) * pageSize,
       take: pageSize,
     });

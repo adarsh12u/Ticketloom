@@ -144,10 +144,30 @@ export function TicketDetailClient({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ body, visibility }),
       });
-      const data = (await response.json()) as { error?: string };
+      const data = (await response.json()) as {
+        error?: string;
+        message?: unknown;
+        email?: { status?: string; to?: string; reason?: string };
+      };
       if (!response.ok) throw new Error(data.error ?? "Unable to post message.");
       clear();
-      toast.success(visibility === "INTERNAL" ? "Internal note added" : "Reply added");
+      if (visibility === "INTERNAL") {
+        toast.success("Internal note added");
+      } else if (data.email?.status === "queued" || data.email?.status === "sent") {
+        toast.success(
+          data.email.to
+            ? `Reply posted and emailed to ${data.email.to}`
+            : "Reply posted and emailed to the customer",
+        );
+      } else if (data.email?.status === "failed") {
+        toast.error(
+          data.email.reason
+            ? `Reply saved, but email failed: ${data.email.reason}`
+            : "Reply saved, but email failed to send.",
+        );
+      } else {
+        toast.success("Reply added");
+      }
       router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to post message.");
@@ -256,7 +276,11 @@ export function TicketDetailClient({
                 Customer-visible conversation
               </CardTitle>
               <CardDescription>
-                Replies here are intended for the customer. Email sync arrives in a later milestone.
+                Replies here are emailed to{" "}
+                <span className="font-medium text-foreground">
+                  {ticket.customer.email}
+                </span>
+                . Internal notes stay private to your team.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -290,7 +314,7 @@ export function TicketDetailClient({
                     onClick={() => addMessage("CUSTOMER", replyBody, () => setReplyBody(""))}
                   >
                     {pending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                    Post reply
+                    Post reply & email
                   </Button>
                 </div>
               ) : null}

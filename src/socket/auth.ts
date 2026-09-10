@@ -16,10 +16,50 @@ export type SocketAuthContext = {
   role: string;
 };
 
-function cookieName() {
-  return process.env.NODE_ENV === "production"
-    ? "__Secure-authjs.session-token"
-    : "authjs.session-token";
+/**
+ * Auth.js uses `__Secure-` cookies only when the app URL is HTTPS.
+ * Docker local runs NODE_ENV=production on http://localhost — cookie must match AUTH_URL,
+ * not NODE_ENV alone (mismatch → socket Offline / composer disabled).
+ */
+function useSecureAuthCookies() {
+  const url = process.env.AUTH_URL || process.env.NEXT_PUBLIC_APP_URL || "";
+  if (url.startsWith("https://")) return true;
+  if (url.startsWith("http://")) return false;
+  return process.env.NODE_ENV === "production";
+}
+
+function cookieName(secure = useSecureAuthCookies()) {
+  return secure ? "__Secure-authjs.session-token" : "authjs.session-token";
+}
+
+async function readSessionToken(options: {
+  cookieHeader: string;
+  secret: string;
+  tokenFromAuth?: string;
+}) {
+  const secure = useSecureAuthCookies();
+  const names = secure
+    ? [cookieName(true), cookieName(false)]
+    : [cookieName(false), cookieName(true)];
+
+  for (const name of names) {
+    const token = await getToken({
+      req: {
+        headers: {
+          cookie: options.cookieHeader,
+          authorization: options.tokenFromAuth
+            ? `Bearer ${options.tokenFromAuth}`
+            : undefined,
+        },
+      } as never,
+      secret: options.secret,
+      secureCookie: name.startsWith("__Secure-"),
+      cookieName: name,
+      raw: false,
+    });
+    if (token?.sub) return token;
+  }
+  return null;
 }
 
 /**
@@ -40,27 +80,22 @@ export async function authenticateSocketHandshake(
   const tokenFromAuth =
     typeof handshake.auth?.token === "string" ? handshake.auth.token : undefined;
 
-  const token = await getToken({
-    req: {
-      headers: {
-        cookie: handshake.headers.cookie ?? "",
-        authorization: tokenFromAuth ? `Bearer ${tokenFromAuth}` : undefined,
-      },
-    } as never,
+  const token = await readSessionToken({
+    cookieHeader: handshake.headers.cookie ?? "",
     secret,
-    secureCookie: process.env.NODE_ENV === "production",
-    cookieName: cookieName(),
-    raw: false,
+    tokenFromAuth,
   });
 
   // Fallback: raw session JWT passed explicitly (tests / non-browser clients)
   let userId = token?.sub;
   if (!userId && tokenFromAuth) {
+    const secure = useSecureAuthCookies();
+    const name = cookieName(secure);
     const decoded = await getToken({
-      req: { headers: { cookie: `${cookieName()}=${tokenFromAuth}` } } as never,
+      req: { headers: { cookie: `${name}=${tokenFromAuth}` } } as never,
       secret,
-      secureCookie: process.env.NODE_ENV === "production",
-      cookieName: cookieName(),
+      secureCookie: secure,
+      cookieName: name,
     });
     userId = decoded?.sub;
   }

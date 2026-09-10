@@ -238,17 +238,29 @@ export const knowledgeRepository = {
     });
     if (existing) return existing;
 
-    return prisma.knowledgeBase.create({
-      data: {
-        organizationId,
-        name: "Knowledge Base",
-        slug: "default",
-        description: "Default organization knowledge base",
-        visibility: "INTERNAL",
-        status: "ACTIVE",
-        createdById: userId,
-      },
-    });
+    try {
+      return await prisma.knowledgeBase.create({
+        data: {
+          organizationId,
+          name: "Knowledge Base",
+          slug: "default",
+          description: "Default organization knowledge base",
+          visibility: "INTERNAL",
+          status: "ACTIVE",
+          createdById: userId,
+        },
+      });
+    } catch (error) {
+      // Parallel first visits (list + categories + tags) can race on create.
+      if ((error as { code?: string }).code === "P2002") {
+        const raced = await prisma.knowledgeBase.findFirst({
+          where: { organizationId, status: "ACTIVE" },
+          orderBy: { createdAt: "asc" },
+        });
+        if (raced) return raced;
+      }
+      throw error;
+    }
   },
 
   async findKnowledgeBase(organizationId: string, knowledgeBaseId: string) {

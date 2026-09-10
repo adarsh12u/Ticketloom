@@ -5,7 +5,12 @@ import { JOB_NAMES, QUEUE_NAMES } from "@/lib/queues/names";
 import type { EmailMessage } from "@/lib/email/email-service";
 
 export type EmailJobPayload = EmailMessage & {
-  purpose: "invitation" | "password-reset" | "email-verification" | "generic";
+  purpose:
+    | "invitation"
+    | "password-reset"
+    | "email-verification"
+    | "ticket-reply"
+    | "generic";
   /** Deterministic idempotency key fragment */
   dedupeKey?: string;
 };

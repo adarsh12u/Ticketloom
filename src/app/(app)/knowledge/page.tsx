@@ -35,6 +35,9 @@ async function KnowledgeContent({
     redirect("/dashboard");
   }
 
+  // Create default KB once before parallel reads (avoids first-visit create races).
+  await knowledgeService.ensureKnowledgeBase(user.id);
+
   const [list, categories, tags] = await Promise.all([
     knowledgeService.list(user.id, parsed.data),
     knowledgeService.listCategories(user.id),

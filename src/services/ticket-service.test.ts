@@ -250,8 +250,10 @@ describe.runIf(runIntegration)("ticketService integration", () => {
       visibility: "CUSTOMER",
     });
 
-    expect(note.visibility).toBe("INTERNAL");
-    expect(reply.visibility).toBe("CUSTOMER");
+    expect(note.message.visibility).toBe("INTERNAL");
+    expect(note.email.status).toBe("skipped");
+    expect(reply.message.visibility).toBe("CUSTOMER");
+    expect(["queued", "sent", "failed"]).toContain(reply.email.status);
 
     const loaded = await ticketService.get(ownerId, ticketId);
     expect(loaded?.messages.some((message) => message.visibility === "INTERNAL")).toBe(true);

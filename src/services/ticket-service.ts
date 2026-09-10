@@ -17,6 +17,7 @@ import {
   invalidateCustomerCaches,
   invalidateTicketCaches,
 } from "@/lib/redis/invalidation";
+import { QueueUnavailableError } from "@/lib/queues/producers";
 import type {
   CreateTicketInput,
   CreateTicketMessageInput,
@@ -25,6 +26,7 @@ import type {
 } from "@/lib/validations/ticket";
 import { ticketRepository } from "@/repositories/ticket-repository";
 import { organizationRepository } from "@/repositories/organization-repository";
+import { deliverEmail } from "@/services/email-delivery-service";
 
 export class TicketServiceError extends Error {
   constructor(
@@ -41,6 +43,14 @@ export class TicketServiceError extends Error {
     super(message);
     this.name = "TicketServiceError";
   }
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 function toPublicTicket(ticket: Awaited<ReturnType<typeof ticketRepository.findByIdForOrg>>) {
@@ -555,7 +565,7 @@ export const ticketService = {
   async addMessage(userId: string, ticketId: string, input: CreateTicketMessageInput) {
     const context = await requireTicketPermission(userId, "tickets.update");
     const organizationId = context.organization.id;
-    await loadTicketOrThrow(organizationId, ticketId);
+    const ticket = await loadTicketOrThrow(organizationId, ticketId);
 
     const message = await ticketRepository.createMessage({
       organizationId,
@@ -565,7 +575,88 @@ export const ticketService = {
       visibility: input.visibility,
     });
 
-    return message;
+    if (input.visibility !== "CUSTOMER") {
+      return { message, email: { status: "skipped" as const, reason: "internal_note" } };
+    }
+
+    const customerEmail = ticket.customer?.email?.trim();
+    if (!customerEmail) {
+      return {
+        message,
+        email: {
+          status: "failed" as const,
+          reason: "Customer has no email address on file.",
+        },
+      };
+    }
+
+    const orgName = context.organization.name;
+    const author =
+      message.author?.name?.trim() ||
+      [message.author?.firstName, message.author?.lastName].filter(Boolean).join(" ").trim() ||
+      message.author?.email ||
+      "Support";
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+    const subject = `Re: [${ticket.numberKey}] ${ticket.subject}`;
+    const text = [
+      `Hello ${ticket.customer.name},`,
+      "",
+      `${author} from ${orgName} replied to your support ticket ${ticket.numberKey}:`,
+      "",
+      input.body.trim(),
+      "",
+      `Ticket: ${ticket.subject}`,
+      `Reference: ${ticket.numberKey}`,
+      "",
+      `— ${orgName} via Ticketloom`,
+      appUrl,
+    ].join("\n");
+    const htmlBody = escapeHtml(input.body.trim()).replaceAll("\n", "<br />");
+    const html = `
+      <p>Hello ${escapeHtml(ticket.customer.name)},</p>
+      <p><strong>${escapeHtml(author)}</strong> from <strong>${escapeHtml(orgName)}</strong> replied to your support ticket <strong>${escapeHtml(ticket.numberKey)}</strong>:</p>
+      <blockquote style="border-left:3px solid #ccc;padding-left:12px;margin:16px 0;color:#222;">${htmlBody}</blockquote>
+      <p style="color:#666;font-size:13px;">Ticket: ${escapeHtml(ticket.subject)}<br/>Reference: ${escapeHtml(ticket.numberKey)}</p>
+      <p style="color:#666;font-size:12px;">— ${escapeHtml(orgName)} via Ticketloom</p>
+    `;
+
+    try {
+      const delivery = await deliverEmail(
+        {
+          to: customerEmail,
+          subject,
+          text,
+          html,
+        },
+        {
+          purpose: "ticket-reply",
+          dedupeKey: message.id,
+        },
+      );
+      return {
+        message,
+        email: {
+          status: delivery.mode === "queued" ? ("queued" as const) : ("sent" as const),
+          to: customerEmail,
+          ...(delivery.mode === "queued" ? { jobId: delivery.jobId } : {}),
+        },
+      };
+    } catch (error) {
+      const reason =
+        error instanceof QueueUnavailableError
+          ? "Email could not be queued. Check Redis/worker and SMTP."
+          : error instanceof Error
+            ? error.message
+            : "Email failed to send.";
+      return {
+        message,
+        email: {
+          status: "failed" as const,
+          to: customerEmail,
+          reason,
+        },
+      };
+    }
   },
 
   async createCustomer(

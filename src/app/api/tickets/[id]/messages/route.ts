@@ -22,8 +22,8 @@ export async function POST(request: Request, context: RouteContext) {
       );
     }
 
-    const message = await ticketService.addMessage(user.id, id, parsed.data);
-    return NextResponse.json({ message }, { status: 201 });
+    const result = await ticketService.addMessage(user.id, id, parsed.data);
+    return NextResponse.json(result, { status: 201 });
   } catch (error) {
     return handleTicketRouteError(error);
   }
